@@ -1,6 +1,12 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const cors = require('cors');
+import express from 'express';
+import path from 'path';
+import fs from 'fs';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,22 +14,100 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json({ limit: '10mb' }));
 
-let allData = []; // tijdelijk alle data opslaan (kan in database)
+let currentRide = [];
+let rideHistory = [];
 
+// Ontvang data
 app.post('/upload', (req, res) => {
   const newData = req.body;
-  console.log('Nieuwe data ontvangen:', newData.length);
 
-  // Voeg nieuwe data toe aan opslag
-  allData = allData.concat(newData);
+  if (!Array.isArray(newData)) {
+    return res.status(400).json({ message: 'Data moet een array zijn' });
+  }
 
-  res.json({ message: 'Data ontvangen', received: newData.length, totalStored: allData.length });
+  console.log(`Ontvangen ${newData.length} datapunten`);
+  currentRide = currentRide.concat(newData);
+
+  res.json({ message: 'Data ontvangen', totaal: currentRide.length });
 });
 
-app.get('/data', (req, res) => {
-  res.json(allData);
+// Stop de opname en analyseer + maak CSV
+app.post('/stop', (req, res) => {
+  if (currentRide.length === 0) {
+    return res.status(400).json({ message: 'Geen data om op te slaan' });
+  }
+
+  rideHistory.push(currentRide);
+  const index = rideHistory.length - 1;
+
+  const csv = convertToCSV(currentRide);
+  const filename = `ride_${index + 1}.csv`;
+  const filePath = path.join(__dirname, 'csv_exports', filename);
+
+  // Zorg dat de map bestaat
+  fs.mkdirSync(path.join(__dirname, 'csv_exports'), { recursive: true });
+
+  fs.writeFileSync(filePath, csv);
+
+  analyzeRide(currentRide);
+
+  currentRide = [];
+
+  res.json({ message: 'Rit opgeslagen en geanalyseerd', index, downloadURL: `/csv/${index}` });
 });
+
+// CSV downloaden
+app.get('/csv/:rideIndex', (req, res) => {
+  const index = parseInt(req.params.rideIndex);
+  const filename = `ride_${index + 1}.csv`;
+  const filePath = path.join(__dirname, 'csv_exports', filename);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ message: 'CSV niet gevonden' });
+  }
+
+  res.download(filePath, filename);
+});
+
+// Data-analyse functie
+function analyzeRide(rideData) {
+  const accelValues = rideData
+    .filter(d => d.acceleration)
+    .map(d => {
+      const { x, y, z } = d.acceleration;
+      return Math.sqrt(x ** 2 + y ** 2 + z ** 2);
+    });
+
+  if (accelValues.length === 0) return console.log('Geen acceleratie-data');
+
+  const gemiddelde = accelValues.reduce((a, b) => a + b, 0) / accelValues.length;
+  const max = Math.max(...accelValues);
+  const min = Math.min(...accelValues);
+
+  console.log('--- Analyse van rit ---');
+  console.log(`Punten: ${rideData.length}`);
+  console.log(`Gemiddelde accel: ${gemiddelde.toFixed(2)}`);
+  console.log(`Max accel: ${max.toFixed(2)}`);
+  console.log(`Min accel: ${min.toFixed(2)}`);
+}
+
+// Zet JSON-array om in CSV
+function convertToCSV(data) {
+  const header = 'timestamp,latitude,longitude,accel_x,accel_y,accel_z,total_accel\n';
+  const rows = data.map(item => {
+    const lat = item.location ? item.location.latitude : '';
+    const lon = item.location ? item.location.longitude : '';
+    const ax = item.acceleration ? item.acceleration.x : '';
+    const ay = item.acceleration ? item.acceleration.y : '';
+    const az = item.acceleration ? item.acceleration.z : '';
+    const total = item.acceleration
+      ? Math.sqrt(ax * ax + ay * ay + az * az)
+      : '';
+    return `${item.timestamp},${lat},${lon},${ax},${ay},${az},${total}`;
+  });
+  return header + rows.join('\n');
+}
 
 app.listen(PORT, () => {
-  console.log(`Server draait op http://localhost:${PORT}`);
+  console.log(`🚴 Backend draait op http://localhost:${PORT}`);
 });
