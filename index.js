@@ -72,11 +72,8 @@ app.get('/csv/:rideIndex', (req, res) => {
 // Data-analyse functie
 function analyzeRide(rideData) {
   const accelValues = rideData
-    .filter(d => d.acceleration)
-    .map(d => {
-      const { x, y, z } = d.acceleration;
-      return Math.sqrt(x ** 2 + y ** 2 + z ** 2);
-    });
+    .filter(d => typeof d.total_accel === 'number')
+    .map(d => d.total_accel);
 
   if (accelValues.length === 0) return console.log('Geen acceleratie-data');
 
@@ -91,19 +88,13 @@ function analyzeRide(rideData) {
   console.log(`Min accel: ${min.toFixed(2)}`);
 }
 
-// Zet JSON-array om in CSV
 function convertToCSV(data) {
-  const header = 'timestamp,latitude,longitude,accel_x,accel_y,accel_z,total_accel\n';
+  const header = 'timestamp,latitude,longitude,total_accel\n';
   const rows = data.map(item => {
-    const lat = item.location ? item.location.latitude : '';
-    const lon = item.location ? item.location.longitude : '';
-    const ax = item.acceleration ? item.acceleration.x : '';
-    const ay = item.acceleration ? item.acceleration.y : '';
-    const az = item.acceleration ? item.acceleration.z : '';
-    const total = item.acceleration
-      ? Math.sqrt(ax * ax + ay * ay + az * az)
-      : '';
-    return `${item.timestamp},${lat},${lon},${ax},${ay},${az},${total}`;
+    const lat = item.location?.latitude ?? '';
+    const lon = item.location?.longitude ?? '';
+    const total = typeof item.total_accel === 'number' ? item.total_accel : '';
+    return `${item.timestamp},${lat},${lon},${total}`;
   });
   return header + rows.join('\n');
 }
