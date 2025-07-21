@@ -37,6 +37,8 @@ app.post('/stop', (req, res) => {
     return res.status(400).json({ message: 'Geen data om op te slaan' });
   }
 
+  console.log('Stopping ride, currentRide length:', currentRide.length);
+
   rideHistory.push(currentRide);
   const index = rideHistory.length - 1;
 
@@ -44,10 +46,15 @@ app.post('/stop', (req, res) => {
   const filename = `ride_${index + 1}.csv`;
   const filePath = path.join(__dirname, 'csv_exports', filename);
 
-  // Zorg dat de map bestaat
   fs.mkdirSync(path.join(__dirname, 'csv_exports'), { recursive: true });
 
-  fs.writeFileSync(filePath, csv);
+  try {
+    fs.writeFileSync(filePath, csv);
+    console.log(`CSV file geschreven: ${filename}, grootte: ${csv.length} bytes`);
+  } catch (e) {
+    console.error('Fout bij schrijven CSV:', e);
+    return res.status(500).json({ message: 'Fout bij opslaan CSV' });
+  }
 
   analyzeRide(currentRide);
 
