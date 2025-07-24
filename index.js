@@ -40,7 +40,7 @@ app.post('/upload', async (req, res) => {
 
   if (values.length > 0) {
     const query = `
-      INSERT INTO measurements (timestamp, latitude, longitude, total_accel)
+      INSERT INTO fietstest (timestamp, latitude, longitude, total_accel)
       VALUES ${values.map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`).join(', ')}
     `;
     const flat = values.flat();
