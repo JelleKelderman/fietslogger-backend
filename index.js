@@ -18,6 +18,32 @@ app.use(bodyParser.json({ limit: '10mb' }));
 let currentRide = [];
 let rideHistory = [];
 
+// --- SSE Setup ---
+const clients = [];
+
+app.get('/events', (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.flushHeaders();
+
+  clients.push(res);
+  console.log('Client connected, totaal:', clients.length);
+
+  req.on('close', () => {
+    clients.splice(clients.indexOf(res), 1);
+    console.log('Client disconnected, totaal:', clients.length);
+  });
+});
+
+function sendEventsToAll(data) {
+  const payload = JSON.stringify(data);
+  clients.forEach(client => client.write(`data: ${payload}\n\n`));
+}
+// --- Einde SSE Setup ---
+
 // Ontvang data
 app.post('/upload', async (req, res) => {
   const newData = req.body;
@@ -28,6 +54,9 @@ app.post('/upload', async (req, res) => {
 
   console.log(`Ontvangen ${newData.length} datapunten`);
   currentRide = currentRide.concat(newData);
+
+  // Stuur de nieuwe data live naar alle SSE clients
+  sendEventsToAll(newData);
 
   const values = newData
     .filter(d => typeof d.total_accel === 'number')
