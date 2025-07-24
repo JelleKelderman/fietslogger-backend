@@ -4,6 +4,7 @@ import fs from 'fs';
 import cors from 'cors';
 import bodyParser from 'body-parser';
 import { fileURLToPath } from 'url';
+import pool from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,7 +19,7 @@ let currentRide = [];
 let rideHistory = [];
 
 // Ontvang data
-app.post('/upload', (req, res) => {
+app.post('/upload', async (req, res) => {
   const newData = req.body;
 
   if (!Array.isArray(newData)) {
@@ -27,6 +28,31 @@ app.post('/upload', (req, res) => {
 
   console.log(`Ontvangen ${newData.length} datapunten`);
   currentRide = currentRide.concat(newData);
+
+  const values = newData
+    .filter(d => typeof d.total_accel === 'number')
+    .map(d => [
+      new Date(parseInt(d.timestamp)),
+      d.latitude ?? d.location?.latitude,
+      d.longitude ?? d.location?.longitude,
+      d.total_accel
+    ]);
+
+  if (values.length > 0) {
+    const query = `
+      INSERT INTO measurements (timestamp, latitude, longitude, total_accel)
+      VALUES ${values.map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`).join(', ')}
+    `;
+    const flat = values.flat();
+
+    try {
+      await pool.query(query, flat);
+      console.log(`✅ ${values.length} metingen opgeslagen in database`);
+    } catch (err) {
+      console.error('❌ Database fout:', err);
+      return res.status(500).json({ message: 'Database fout' });
+    }
+  }
 
   res.json({ message: 'Data ontvangen', totaal: currentRide.length });
 });
