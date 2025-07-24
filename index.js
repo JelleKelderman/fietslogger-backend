@@ -132,6 +132,16 @@ function convertToCSV(data) {
   return header + rows.join('\n');
 }
 
+app.get('/test-db', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    res.json({ success: true, time: result.rows[0].now });
+  } catch (err) {
+    console.error('❌ Fout bij verbinden met database:', err);
+    res.status(500).json({ success: false, message: 'Database connectie mislukt' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚴 Backend draait op http://localhost:${PORT}`);
 });
