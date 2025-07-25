@@ -1,242 +1,167 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, Button, FlatList, Alert } from 'react-native';
-import * as Location from 'expo-location';
-import { Accelerometer } from 'expo-sensors';
-import { StatusBar } from 'expo-status-bar';
-import { LineChart } from 'react-native-chart-kit';
+import express from 'express';
+import path from 'path';
+import fs from 'fs';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+import { fileURLToPath } from 'url';
+import { WebSocketServer } from 'ws';
+import http from 'http';
 
-const WS_URL = 'wss://websocket-server-production-d0da.up.railway.app/';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-export default function App() {
-  const [recording, setRecording] = useState(false);
-  const [data, setData] = useState([]);
-  const [latestLocation, setLatestLocation] = useState(null);
-  const locationSub = useRef(null);
-  const accelSub = useRef(null);
-  const latestLocationRef = useRef(null);
-  const dataRef = useRef([]);
-  const ws = useRef(null);
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-  // Hou refs up-to-date
-  useEffect(() => {
-    latestLocationRef.current = latestLocation;
-  }, [latestLocation]);
+app.use(cors());
+app.use(bodyParser.json({ limit: '10mb' }));
 
-  useEffect(() => {
-    dataRef.current = data;
-  }, [data]);
+let currentRide = [];
+let rideHistory = [];
 
-  // WebSocket setup
-  useEffect(() => {
-    ws.current = new WebSocket(WS_URL);
+// --- SSE Setup ---
+const sseClients = [];
 
-    ws.current.onopen = () => {
-      console.log('WebSocket verbinding open');
-    };
+app.get('/sse/events', (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.flushHeaders();
 
-    ws.current.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data);
-        if (Array.isArray(parsed)) {
-          setData((prev) => [...prev, ...parsed]);
-        }
-      } catch (e) {
-        console.error('Fout bij parsen WebSocket bericht:', e);
-      }
-    };
+  sseClients.push(res);
+  console.log('SSE Client connected, totaal:', sseClients.length);
 
-    ws.current.onerror = (error) => {
-      console.error('WebSocket fout:', error.message);
-    };
+  req.on('close', () => {
+    sseClients.splice(sseClients.indexOf(res), 1);
+    console.log('SSE Client disconnected, totaal:', sseClients.length);
+  });
+});
 
-    ws.current.onclose = (event) => {
-      console.log('WebSocket connectie gesloten:', event.code, event.reason);
-    };
+function sendEventsToAllSSE(data) {
+  const payload = JSON.stringify(data);
+  sseClients.forEach(client => client.write(`data: ${payload}\n\n`));
+}
+// --- Einde SSE Setup ---
 
-    return () => {
-      if (ws.current.readyState === WebSocket.OPEN) {
-        ws.current.close();
-      }
-    };
-  }, []);
+// --- WebSocket Setup ---
+const clientsWS = new Set();
 
-  // Locatie & accelerometer verzamelen
-  useEffect(() => {
-    if (!recording) {
-      if (locationSub.current) locationSub.current.remove();
-      if (accelSub.current) accelSub.current.remove();
-      locationSub.current = null;
-      accelSub.current = null;
-      return;
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server, path: '/ws/events' });
+
+wss.on('connection', (ws) => {
+  clientsWS.add(ws);
+  console.log('📡 Client verbonden via WebSocket');
+
+  ws.on('close', () => {
+    clientsWS.delete(ws);
+    console.log('❌ WebSocket verbinding gesloten');
+  });
+});
+
+function broadcastToWSClients(data) {
+  const payload = JSON.stringify(data);
+  clientsWS.forEach(client => {
+    if (client.readyState === client.OPEN) {
+      client.send(payload);
     }
+  });
+}
+// --- Einde WebSocket Setup ---
 
-    (async () => {
-      const { status: locStatus } = await Location.requestForegroundPermissionsAsync();
-      if (locStatus !== 'granted') {
-        alert('Location permission not granted');
-        setRecording(false);
-        return;
-      }
+app.post('/upload', (req, res) => {
+  const newData = req.body;
 
-      locationSub.current = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.Highest, timeInterval: 1000, distanceInterval: 1 },
-        (location) => {
-          setLatestLocation({
-            latitude: location.coords.latitude,
-            longitude: location.coords.longitude,
-          });
-          // Voeg locatie toe met null acceleratie voorlopig
-          setData(prev => [...prev, {
-            timestamp: Date.now(),
-            location: {
-              latitude: location.coords.latitude,
-              longitude: location.coords.longitude,
-            },
-            total_accel: null,
-          }]);
-        }
-      );
-    })();
+  if (!Array.isArray(newData)) {
+    return res.status(400).json({ message: 'Data moet een array zijn' });
+  }
 
-    Accelerometer.setUpdateInterval(20);
-    accelSub.current = Accelerometer.addListener(accelData => {
-      const totalAccel = Math.sqrt(accelData.x ** 2 + accelData.y ** 2 + accelData.z ** 2);
-      setData(prev => [...prev, {
-        timestamp: Date.now(),
-        location: latestLocationRef.current,
-        total_accel: totalAccel,
-      }]);
-    });
+  console.log(`Ontvangen ${newData.length} datapunten`);
+  currentRide = currentRide.concat(newData);
 
-    return () => {
-      if (locationSub.current) locationSub.current.remove();
-      if (accelSub.current) accelSub.current.remove();
-    };
-  }, [recording]);
+  // Stuur nieuwe data naar frontend via SSE en WebSocket
+  sendEventsToAllSSE(newData);
+  broadcastToWSClients(newData);
 
-  // Data iedere 30 seconden via WebSocket verzenden
-  useEffect(() => {
-    if (!recording) return;
+  res.json({ message: 'Data ontvangen', totaal: currentRide.length });
+});
 
-    const interval = setInterval(() => {
-      if (dataRef.current.length === 0 || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
+app.post('/stop', (req, res) => {
+  if (currentRide.length === 0) {
+    return res.status(400).json({ message: 'Geen data om op te slaan' });
+  }
 
-      const payload = JSON.stringify({ type: 'data', payload: dataRef.current });
-      ws.current.send(payload);
-      setData([]);
-    }, 30000);
+  console.log('Stopping ride, currentRide length:', currentRide.length);
 
-    return () => clearInterval(interval);
-  }, [recording]);
+  rideHistory.push(currentRide);
+  const index = rideHistory.length - 1;
 
-  const toggleRecording = async () => {
-    if (recording) {
-      // Stuur laatste data voor stoppen
-      if (dataRef.current.length > 0) {
-        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-          ws.current.send(JSON.stringify({ type: 'data', payload: dataRef.current }));
-          setData([]);
-        } else {
-          Alert.alert('Fout', 'WebSocket is niet verbonden.');
-          return;
-        }
-      }
+  const csv = convertToCSV(currentRide);
+  const filename = `ride_${index + 1}.csv`;
+  const filePath = path.join(__dirname, 'csv_exports', filename);
 
-      // Stuur stop bericht
-      try {
-        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-          ws.current.send(JSON.stringify({ type: 'stop' }));
-        }
+  fs.mkdirSync(path.join(__dirname, 'csv_exports'), { recursive: true });
 
-        // Je kunt ook nog de REST endpoint /stop aanroepen voor CSV opslaan
-        const response = await fetch('https://websocket-server-production-d0da.up.railway.app/stop', { method: 'POST' });
-        if (response.ok) {
-          const result = await response.json();
-          Alert.alert('Succes', 'Rit opgeslagen en CSV gegenereerd!');
-          console.log('CSV download link:', `https://websocket-server-production-d0da.up.railway.app${result.downloadURL}`);
-        } else {
-          const text = await response.text();
-          Alert.alert('Fout', text || 'Stoppen mislukt');
-        }
-      } catch (e) {
-        Alert.alert('Fout', 'Er is een fout opgetreden bij stoppen.');
-      }
+  try {
+    fs.writeFileSync(filePath, csv);
+    console.log(`CSV file geschreven: ${filename}, grootte: ${csv.length} bytes`);
+  } catch (e) {
+    console.error('Fout bij schrijven CSV:', e);
+    return res.status(500).json({ message: 'Fout bij opslaan CSV' });
+  }
 
-      setRecording(false);
-    } else {
-      setData([]);
-      setRecording(true);
-    }
-  };
+  analyzeRide(currentRide);
 
-  const accelData = data
-    .filter(item => typeof item.total_accel === 'number')
-    .map(item => ({
-      time: (item.timestamp - data[0]?.timestamp) / 1000,
-      total: item.total_accel,
-    }));
+  currentRide = [];
 
-  const accelValues = accelData.map(d => d.total);
+  res.json({ message: 'Rit opgeslagen en geanalyseerd', index, downloadURL: `/csv/${index}` });
+});
 
-  const resetData = () => {
-    setData([]);
-  };
+app.get('/csv/:rideIndex', (req, res) => {
+  const index = parseInt(req.params.rideIndex);
+  const filename = `ride_${index + 1}.csv`;
+  const filePath = path.join(__dirname, 'csv_exports', filename);
 
-  return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Fietslogger</Text>
-      <Button
-        title={recording ? "Stop Recording & stuur CSV naar backend" : "Start Recording"}
-        onPress={toggleRecording}
-      />
-      <Button title="Reset Data" onPress={resetData} />
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ message: 'CSV niet gevonden' });
+  }
 
-      {accelValues.length > 0 && (
-        <View style={{ marginVertical: 20 }}>
-          <LineChart
-            data={{
-              labels: accelData.map(d => d.time.toFixed(0)),
-              datasets: [{ data: accelValues }],
-            }}
-            width={350}
-            height={200}
-            yAxisSuffix=""
-            chartConfig={{
-              backgroundColor: "#fff",
-              backgroundGradientFrom: "#fff",
-              backgroundGradientTo: "#fff",
-              decimalPlaces: 2,
-              color: (opacity = 1) => `rgba(134, 65, 244, ${opacity})`,
-              labelColor: (opacity = 1) => `rgba(0,0,0,${opacity})`,
-              style: { borderRadius: 16 },
-              propsForDots: { r: "2", strokeWidth: "1", stroke: "#ffa726" },
-            }}
-            bezier
-            style={{ borderRadius: 8 }}
-          />
-          <Text style={{ textAlign: 'center' }}>Tijd (seconden) op X-as, Totale acceleratie op Y-as</Text>
-        </View>
-      )}
+  res.download(filePath, filename);
+});
 
-      <FlatList
-        data={data.filter(item => item.total_accel !== undefined).slice(-10).reverse()}
-        keyExtractor={(_, i) => i.toString()}
-        renderItem={({ item }) => (
-          <View style={styles.item}>
-            <Text>Tijd: {new Date(item.timestamp).toLocaleTimeString()}</Text>
-            <Text>Locatie: {item.location ? `${item.location.latitude.toFixed(5)}, ${item.location.longitude.toFixed(5)}` : 'N/A'}</Text>
-            <Text>Totale acceleratie: {item.total_accel?.toFixed(2)}</Text>
-          </View>
-        )}
-      />
+function analyzeRide(rideData) {
+  const accelValues = rideData
+    .filter(d => typeof d.total_accel === 'number')
+    .map(d => d.total_accel);
 
-      <StatusBar style="auto" />
-    </View>
-  );
+  if (accelValues.length === 0) return console.log('Geen acceleratie-data');
+
+  const gemiddelde = accelValues.reduce((a, b) => a + b, 0) / accelValues.length;
+  const max = Math.max(...accelValues);
+  const min = Math.min(...accelValues);
+
+  console.log('--- Analyse van rit ---');
+  console.log(`Punten: ${rideData.length}`);
+  console.log(`Gemiddelde accel: ${gemiddelde.toFixed(2)}`);
+  console.log(`Max accel: ${max.toFixed(2)}`);
+  console.log(`Min accel: ${min.toFixed(2)}`);
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff', paddingTop: 40, paddingHorizontal: 10 },
-  title: { fontSize: 24, marginBottom: 20, textAlign: 'center' },
-  item: { borderBottomWidth: 1, borderBottomColor: '#eee', paddingVertical: 8 },
+function convertToCSV(data) {
+  const header = 'timestamp,latitude,longitude,total_accel\n';
+  const rows = data.map(item => {
+    const lat = item.location?.latitude ?? '';
+    const lon = item.location?.longitude ?? '';
+    const total = typeof item.total_accel === 'number' ? item.total_accel : '';
+    return `${item.timestamp},${lat},${lon},${total}`;
+  });
+  return header + rows.join('\n');
+}
+
+server.listen(PORT, () => {
+  console.log(`🚴 Backend draait op http://localhost:${PORT}`);
+  console.log(`📡 WebSocket actief op ws://localhost:${PORT}/ws/events`);
+  console.log(`🔴 SSE actief op http://localhost:${PORT}/sse/events`);
 });
