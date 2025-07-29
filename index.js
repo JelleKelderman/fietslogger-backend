@@ -19,32 +19,6 @@ app.use(bodyParser.json({ limit: '10mb' }));
 let currentRide = [];
 let rideHistory = [];
 
-// --- SSE Setup ---
-const sseClients = [];
-
-app.get('/sse/events', (req, res) => {
-  res.set({
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-  });
-  res.flushHeaders();
-
-  sseClients.push(res);
-  console.log('SSE Client connected, totaal:', sseClients.length);
-
-  req.on('close', () => {
-    sseClients.splice(sseClients.indexOf(res), 1);
-    console.log('SSE Client disconnected, totaal:', sseClients.length);
-  });
-});
-
-function sendEventsToAllSSE(data) {
-  const payload = JSON.stringify(data);
-  sseClients.forEach(client => client.write(`data: ${payload}\n\n`));
-}
-// --- Einde SSE Setup ---
-
 // --- WebSocket Setup ---
 const clientsWS = new Set();
 
@@ -81,8 +55,7 @@ app.post('/upload', (req, res) => {
   console.log(`Ontvangen ${newData.length} datapunten`);
   currentRide = currentRide.concat(newData);
 
-  // Stuur nieuwe data naar frontend via SSE en WebSocket
-  sendEventsToAllSSE(newData);
+  // Stuur nieuwe data naar frontend via WebSocket
   broadcastToWSClients(newData);
 
   res.json({ message: 'Data ontvangen', totaal: currentRide.length });
@@ -163,5 +136,4 @@ function convertToCSV(data) {
 server.listen(PORT, () => {
   console.log(`🚴 Backend draait op http://localhost:${PORT}`);
   console.log(`📡 WebSocket actief op ws://localhost:${PORT}/ws/events`);
-  console.log(`🔴 SSE actief op http://localhost:${PORT}/sse/events`);
 });
